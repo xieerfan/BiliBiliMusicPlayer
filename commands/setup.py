@@ -25,7 +25,7 @@ def save_config(config_data):
         json.dump(config_data, f, ensure_ascii=False, indent=4)
 
 def display_list(videos, page, page_size, input_buffer, title):
-    sys.stdout.write("\033[H\033[J")
+    os.system('clear')
     print_banner()
     start = page * page_size
     current_batch = videos[start:start+page_size]
