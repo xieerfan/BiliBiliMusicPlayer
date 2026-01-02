@@ -2,40 +2,96 @@ import subprocess
 import os
 import asyncio
 import time
+import sys
+import select
+import tty
+import termios
+import json
+import socket
 from bilibili_api import video
 from rich.live import Live
-from utils.banner import console, make_player_layout
+from utils.banner import console, make_player_ui
+
+# 定义 Socket 路径
+SOCKET_PATH = "/tmp/mpv-socket"
+
+def send_mpv_command(command_list):
+    """通过 Unix Socket 发送 JSON 指令"""
+    try:
+        if not os.path.exists(SOCKET_PATH): return
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.connect(SOCKET_PATH)
+        msg = {"command": command_list}
+        client.send(json.dumps(msg).encode() + b"\n")
+        client.close()
+    except:
+        pass
+
+def check_stdin():
+    if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
+        return sys.stdin.read(1)
+    return None
 
 async def play_audio_stream(track, all_tracks, index, total):
     v = video.Video(bvid=track['bvid'])
-    proc = None
+    start_time = time.time()
+    pause_time_sum = 0
+    last_pause_start = 0
+    skip_flag = False
+    is_paused = False
+    
+    # 清理旧的 Socket
+    if os.path.exists(SOCKET_PATH): os.remove(SOCKET_PATH)
+    
     try:
-        # 1. 真正的获取音频逻辑
-        download_url_data = await v.get_download_url(page_index=0)
-        audio_url = download_url_data['dash']['audio'][0]['base_url'] if 'dash' in download_url_data else download_url_data['durl'][0]['url']
+        data = await v.get_download_url(page_index=0)
+        url = data['dash']['audio'][0]['base_url'] if 'dash' in data else data['durl'][0]['url']
         
-        # 2. 静默启动 mpv
-        cmd = [
-            "mpv", audio_url, "--no-video",
-            f"--referrer=https://www.bilibili.com/video/{track['bvid']}",
-            "--msg-level=all=no", "--input-terminal=yes"
-        ]
+        # 启动 mpv，开启 --input-ipc-server
+        proc = subprocess.Popen(
+            ["mpv", url, "--no-video", "--msg-level=all=no", f"--input-ipc-server={SOCKET_PATH}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+
+        old_settings = termios.tcgetattr(sys.stdin)
+        tty.setcbreak(sys.stdin.fileno())
+
+        try:
+            with Live(console=console, refresh_per_second=10, screen=True) as live:
+                while proc.poll() is None:
+                    # 时间进度补偿
+                    if is_paused:
+                        v_start = time.time() - (last_pause_start - start_time - pause_time_sum)
+                    else:
+                        v_start = start_time + pause_time_sum
+
+                    live.update(make_player_ui(track['title'], all_tracks, index, total, v_start, is_paused))
+                    
+                    key = check_stdin()
+                    if key:
+                        k = key.lower()
+                        if k == 'q':
+                            skip_flag = True
+                            break
+                        elif k in (' ', '\x20'):
+                            is_paused = not is_paused
+                            # 终极指令发送：直接写 Socket 文件
+                            send_mpv_command(["set_property", "pause", is_paused])
+                            
+                            if is_paused:
+                                last_pause_start = time.time()
+                            else:
+                                pause_time_sum += (time.time() - last_pause_start)
+                    
+                    await asyncio.sleep(0.08)
+        finally:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+            if proc:
+                proc.terminate()
+                proc.wait()
+            if os.path.exists(SOCKET_PATH): os.remove(SOCKET_PATH)
+
+    except Exception:
+        await asyncio.sleep(1)
         
-        # 使用 Popen 方便我们随时杀掉它
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        # 3. 实时渲染界面
-        os.system('clear')
-        with Live(console=console, refresh_per_second=12, transient=True) as live:
-            while proc.poll() is None:
-                live.update(make_player_layout(track['title'], all_tracks, index, total))
-                await asyncio.sleep(0.08)
-
-    except Exception as e:
-        console.print(f"\n[#f38ba8]Error:[/] {e}")
-        await asyncio.sleep(2)
-    finally:
-        # 4. 关键：确保函数退出时杀死当前 mpv 进程，防止叠加播放
-        if proc:
-            proc.terminate()
-            proc.wait()
+    return "skip" if skip_flag else "next"

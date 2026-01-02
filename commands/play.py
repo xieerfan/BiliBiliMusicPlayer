@@ -15,7 +15,10 @@ def play():
     
     idx = 0
     while idx < len(tracks):
-        # 每次只运行一个协程，确保顺序执行
-        asyncio.run(play_audio_stream(tracks[idx], tracks, idx + 1, len(tracks)))
+        # 获取播放状态
+        result = asyncio.run(play_audio_stream(tracks[idx], tracks, idx + 1, len(tracks)))
+        
+        # 无论自然播完还是按 Q 跳过，都进入下一首
         idx += 1
-        if idx >= len(tracks): idx = 0 # 列表循环
+        if idx >= len(tracks):
+            idx = 0 # 列表循环
