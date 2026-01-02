@@ -1,10 +1,20 @@
+import random
 from rich.console import Console
 from rich.text import Text
 from rich.table import Table
+from rich.layout import Layout
 
 console = Console()
 
-# 找回字符艺术并使用低饱和度的 Mauve 配色
+# Catppuccin Mocha Palette
+MAUVE = "#cba6f7"
+LAVENDER = "#b4befe"
+GREEN = "#a6e3a1"
+SURFACE0 = "#313244"
+OVERLAY0 = "#6c7086"
+TEXT = "#cdd6f4"
+BASE = "#1e1e2e"
+
 BILI_ART = r"""
   ____  _ _ _ ____  _ _ _ 
  | __ )(_) (_) __ )(_) (_)
@@ -13,44 +23,43 @@ BILI_ART = r"""
  |____/|_|_|_|____/|_|_|_|"""
 
 def print_banner():
-    """设置界面使用的 Banner"""
-    console.print(BILI_ART, style="#cba6f7") # Mauve
-    console.print("-" * 50, style="#6c7086") # Overlay0
-    console.print("  [#b4befe]BiliBili MusicPlayer[/] | [#bac2de]MTF Edition 2026[/]\n")
+    """供 setup 和 main 使用，绝对不会再报 ImportError 了喵！"""
+    console.print(BILI_ART, style=MAUVE)
+    console.print(f" {'━' * 48}", style=SURFACE0)
+    console.print(f"  [#b4befe]BiliBili MusicPlayer[/] | [#bac2de]MTF Edition 2026[/]\n")
 
-def print_player_ui(current_track, tracks, index, total):
-    """
-    播放界面：参考 Catppuccin 配色
-    """
-    # 顶部信息：Lavender 背景，深色字
-    header = Text()
-    header.append(" NOW PLAYING ", style="bold #1e1e2e on #b4befe") # Base on Lavender
-    header.append(f" {current_track}", style="#cdd6f4") # Text
-    console.print("\n", header)
-    
-    # 播放列表：低饱和度配色
+def get_visualizer(width=46):
+    """生成 ASCII 频谱"""
+    chars = [" ", " ", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+    return Text("".join(random.choice(chars) for _ in range(width)), style=MAUVE)
+
+def make_player_layout(current_track, tracks, index, total):
+    """构建播放界面"""
+    layout = Layout()
+    layout.split_column(
+        Layout(name="header", size=3),
+        Layout(name="body", size=10),
+        Layout(name="footer", size=5)
+    )
+
+    layout["header"].update(Text(f"\n ◉ NOW PLAYING: {current_track}", style=f"bold {MAUVE}"))
+
     table = Table(show_header=False, box=None, padding=(0, 1), show_edge=False)
-    table.add_column("Status", width=3)
     table.add_column("ID", width=4)
     table.add_column("Title")
-
-    start = max(0, index - 3)
-    end = min(total, index + 5)
     
+    start = max(0, index - 3)
+    end = min(total, index + 4)
     for i in range(start, end):
         t_idx = i + 1
-        title = tracks[i]['title']
-        
-        if t_idx == index:
-            # 当前播放：Green 高亮，深色字
-            table.add_row(" > ", f"{t_idx:02d}", title, style="bold #1e1e2e on #a6e3a1")
-        else:
-            # 未播放：Overlay0 灰色
-            table.add_row("   ", f"{t_idx:02d}", title, style="#6c7086")
-
-    console.print("\n", table)
+        title = tracks[i]['title'][:40]
+        style = f"bold {BASE} on {GREEN}" if t_idx == index else OVERLAY0
+        table.add_row(f"{t_idx:02d}", title, style=style)
     
-    # 底部统计：Subtext0 风格
-    footer = Text(f" [ {index} / {total} ]  Space: Pause | Q: Next | 9,0: Vol", style="#a6adc8")
-    console.print("\n", footer)
-    console.print("-" * 50, style="#6c7086")
+    layout["body"].update(table)
+
+    viz = get_visualizer()
+    info = Text(f"\n [ {index}/{total} ]  Space:Pause | Q:Skip\n {'━' * 48}\n", style=SURFACE0)
+    layout["footer"].update(Text.assemble(info, viz))
+
+    return layout

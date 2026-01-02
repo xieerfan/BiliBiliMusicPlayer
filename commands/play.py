@@ -4,19 +4,18 @@ import os
 import asyncio
 from core.player import play_audio_stream
 
-CONFIG_PATH = os.path.expanduser("~/.config/BiliBiliMusicPlayer/config.json")
-
 @click.command()
 def play():
-    if not os.path.exists(CONFIG_PATH): return
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        config = json.load(f)
+    cfg_path = os.path.expanduser("~/.config/BiliBiliMusicPlayer/config.json")
+    if not os.path.exists(cfg_path): return
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        tracks = json.load(f).get("tracks", [])
     
-    tracks = config.get("tracks", [])
     if not tracks: return
     
-    total = len(tracks)
-    while True:
-        for index, track in enumerate(tracks):
-            # 确保传入: 当前歌曲字典, 完整列表, 当前序号(1起), 总数
-            asyncio.run(play_audio_stream(track, tracks, index + 1, total))
+    idx = 0
+    while idx < len(tracks):
+        # 每次只运行一个协程，确保顺序执行
+        asyncio.run(play_audio_stream(tracks[idx], tracks, idx + 1, len(tracks)))
+        idx += 1
+        if idx >= len(tracks): idx = 0 # 列表循环
