@@ -1,3 +1,9 @@
+try:
+    from bilibili_api.clients import CurlCFFIClient
+    import curl_cffi.requests
+except ImportError:
+    pass
+
 from bilibili_api import channel_series, video
 
 async def fetch_all_videos(season_id):
