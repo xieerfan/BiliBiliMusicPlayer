@@ -2,8 +2,9 @@ import click
 import json
 import os
 import asyncio
-# 确保导入 json 喵！
-from core.player import play_audio_stream
+from core.player import play_audio_stream, PlayerCallbackHandler
+from core.mpris_controller import MPRISController
+
 
 def load_config():
     cfg_path = os.path.expanduser("~/.config/BiliBiliMusicPlayer/config.json")
@@ -12,24 +13,77 @@ def load_config():
             return json.load(f)
     return {"tracks": [], "lang": "zh"}
 
+
 @click.command()
-def play():
+@click.option('--no-mpris', is_flag=True, help='禁用 MPRIS 媒体控制')
+def play(no_mpris):
+    """播放歌单（支持 MPRIS 媒体控制）"""
     config = load_config()
     tracks = config.get("tracks", [])
     lang = config.get("lang", "zh")
     
-    if not tracks: return
+    if not tracks:
+        return
     
-    idx = 0
-    while idx < len(tracks):
-        # 获取播放状态返回值
-        result = asyncio.run(play_audio_stream(tracks[idx], tracks, idx + 1, len(tracks), lang))
-        
-        if result == "exit":
-            # 如果是 ESC 退出，直接跳出 while 循环返回终端
-            break
-        
-        # 否则（自然播完或 Q 跳过）继续下一首
-        idx += 1
-        if idx >= len(tracks):
-            idx = 0 # 列表循环
+    # 初始化 MPRIS 控制器
+    mpris_controller = None
+    callback_handler = None
+    
+    if not no_mpris:
+        try:
+            callback_handler = PlayerCallbackHandler()
+            mpris_controller = MPRISController(callback_handler)
+            
+            if mpris_controller.start():
+                click.echo("✓ MPRIS 媒体控制已启用")
+            else:
+                click.echo("⚠ MPRIS 启动失败，继续播放...")
+                mpris_controller = None
+        except Exception as e:
+            click.echo(f"⚠ MPRIS 初始化失败: {e}")
+            mpris_controller = None
+    
+    try:
+        idx = 0
+        while idx < len(tracks):
+            # 重置回调处理器状态
+            if callback_handler:
+                callback_handler.should_skip = False
+                callback_handler.should_previous = False
+                callback_handler.should_exit = False
+            
+            # 播放当前曲目
+            result = asyncio.run(
+                play_audio_stream(
+                    tracks[idx], 
+                    tracks, 
+                    idx + 1, 
+                    len(tracks), 
+                    lang,
+                    mpris_controller,
+                    callback_handler
+                )
+            )
+            
+            # 根据返回值决定下一步
+            if result == "exit":
+                # ESC 退出或 MPRIS 停止
+                break
+            elif result == "previous":
+                # 上一曲
+                idx = max(0, idx - 1)
+            else:
+                # "next" 或 "skip": 下一曲
+                idx += 1
+                if idx >= len(tracks):
+                    idx = 0  # 列表循环
+    
+    finally:
+        # 停止 MPRIS 服务
+        if mpris_controller:
+            mpris_controller.stop()
+            click.echo("✓ MPRIS 服务已停止")
+
+
+if __name__ == '__main__':
+    play()
