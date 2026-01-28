@@ -72,20 +72,24 @@ def send_mpv_command(command_list):
         if not os.path.exists(SOCKET_PATH):
             return None
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        client.settimeout(0.5)
+        client.settimeout(0.3)
         client.connect(SOCKET_PATH)
         msg = {"command": command_list}
         client.send(json.dumps(msg).encode() + b"\n")
         
         # 接收响应
         response = b""
-        while True:
-            chunk = client.recv(1024)
-            if not chunk:
-                break
-            response += chunk
-            if b'\n' in response:
-                break
+        client.settimeout(0.2)
+        try:
+            while True:
+                chunk = client.recv(1024)
+                if not chunk:
+                    break
+                response += chunk
+                if b'\n' in response:
+                    break
+        except socket.timeout:
+            pass
         
         client.close()
         
@@ -103,22 +107,9 @@ def check_stdin():
     return None
 
 
-async def get_video_duration(bvid):
-    """获取视频实际时长（秒）"""
-    try:
-        v = video.Video(bvid=bvid)
-        info = await v.get_info()
-        # B站返回的 duration 是秒
-        duration = info.get('duration', 240)
-        return duration
-    except Exception as e:
-        console.print(f"[yellow]⚠ 获取时长失败: {e}, 使用默认值[/yellow]")
-        return 240
-
-
 async def play_audio_stream(track, all_tracks, index, total, lang="zh", mpris_controller=None, callback_handler=None):
     """
-    播放核心逻辑（集成 MPRIS 支持）
+    播放核心逻辑（集成 MPRIS 支持 + 封面）
     
     返回状态: 
         "next" (自然结束)
@@ -137,21 +128,36 @@ async def play_audio_stream(track, all_tracks, index, total, lang="zh", mpris_co
     proc = None
     
     try:
-        # 获取 B 站音频流地址
-        data = await v.get_download_url(page_index=0)
-        url = data['dash']['audio'][0]['base_url'] if 'dash' in data else data['durl'][0]['url']
+        # 获取视频信息
+        console.print(f"[dim]正在获取视频信息...[/dim]")
+        info = await v.get_info()
+        video_duration = info.get('duration', 240)
+        cover_url = info.get('pic', '')
+        uploader = info.get('owner', {}).get('name', 'BiliBili')
         
-        # 获取视频实际时长
-        video_duration = await get_video_duration(track['bvid'])
+        # 获取音频流地址
+        console.print(f"[dim]正在获取音频流...[/dim]")
+        data = await v.get_download_url(page_index=0)
+        
+        if 'dash' in data and 'audio' in data['dash']:
+            url = data['dash']['audio'][0]['base_url']
+        elif 'durl' in data:
+            url = data['durl'][0]['url']
+        else:
+            console.print(f"[red]✗ 无法获取音频流[/red]")
+            return "skip"
+        
+        console.print(f"[green]✓ 准备播放[/green]")
         
         # 更新 MPRIS 元数据
         if mpris_controller:
             track_info = {
                 'id': track['bvid'],
                 'title': track['title'],
-                'artist': 'BiliBili',
+                'artist': uploader,
                 'album': 'BiliBili Music',
-                'length': video_duration,  # 使用实际时长
+                'length': video_duration,
+                'cover_url': cover_url,
                 'url': f"https://www.bilibili.com/video/{track['bvid']}"
             }
             mpris_controller.update_track(track_info)
@@ -166,7 +172,7 @@ async def play_audio_stream(track, all_tracks, index, total, lang="zh", mpris_co
         
         # 等待 Socket 文件创建
         socket_ready = False
-        for _ in range(20):  # 最多等待 2 秒
+        for i in range(30):  # 增加等待时间到 3 秒
             if os.path.exists(SOCKET_PATH):
                 socket_ready = True
                 break
@@ -176,27 +182,35 @@ async def play_audio_stream(track, all_tracks, index, total, lang="zh", mpris_co
             console.print("[red]✗ MPV Socket 初始化失败[/red]")
             return "skip"
         
-        # 记录播放开始时间（用于 UI 显示）
+        # 额外等待确保 mpv 真正开始播放
+        await asyncio.sleep(0.5)
+        
+        # 记录播放开始时间
         ui_start_time = time.time()
         pause_time_sum = 0
         last_pause_start = 0
         
-        # 终端进入原始模式以捕获按键
+        # 终端进入原始模式
         old_settings = termios.tcgetattr(sys.stdin)
         tty.setcbreak(sys.stdin.fileno())
         
         try:
             with Live(console=console, refresh_per_second=10, screen=True) as live:
                 while True:
-                    # 检查 mpv 进程是否还在运行
+                    # 检查 mpv 进程是否退出
                     if proc.poll() is not None:
-                        # mpv 进程已结束，自然播放完成
                         status = "next"
                         break
                     
+                    # 检查是否到达文件末尾
+                    eof_response = send_mpv_command(["get_property", "eof-reached"])
+                    if eof_response and eof_response.get("error") == "success":
+                        if eof_response.get("data") is True:
+                            status = "next"
+                            break
+                    
                     # 检查 MPRIS 命令
                     if callback_handler:
-                        # 处理播放/暂停
                         if callback_handler.current_command == 'toggle_pause':
                             is_paused = not is_paused
                             send_mpv_command(["set_property", "pause", is_paused])
@@ -212,41 +226,34 @@ async def play_audio_stream(track, all_tracks, index, total, lang="zh", mpris_co
                             
                             callback_handler.current_command = None
                         
-                        # 处理下一曲
                         if callback_handler.should_skip:
                             status = "skip"
                             break
                         
-                        # 处理上一曲
                         if callback_handler.should_previous:
                             status = "previous"
                             break
                         
-                        # 处理退出
                         if callback_handler.should_exit:
                             status = "exit"
                             break
                     
-                    # 获取 mpv 实际播放位置
+                    # 获取当前播放位置
                     response = send_mpv_command(["get_property", "time-pos"])
                     current_time = 0
                     
                     if response and response.get("error") == "success":
                         current_time = response.get("data", 0)
                     else:
-                        # 降级：使用计算的时间
                         if is_paused:
                             current_time = last_pause_start - ui_start_time - pause_time_sum
                         else:
                             current_time = time.time() - ui_start_time - pause_time_sum
                     
-                    # 限制显示时间不超过总时长
                     current_time = max(0, min(current_time, video_duration))
-                    
-                    # 计算用于 UI 显示的虚拟开始时间
                     v_start = time.time() - current_time
                     
-                    # 更新 MPRIS 播放位置
+                    # 更新 MPRIS 位置
                     if mpris_controller and not is_paused:
                         mpris_controller.update_position(current_time)
                     
@@ -261,27 +268,21 @@ async def play_audio_stream(track, all_tracks, index, total, lang="zh", mpris_co
                         lang
                     ))
                     
-                    # 检查键盘输入
+                    # 键盘输入检测
                     key = check_stdin()
                     if key:
-                        # ESC 退出
                         if key == '\x1b':
                             status = "exit"
                             break
                         
                         k = key.lower()
                         
-                        # Q 跳过
                         if k == 'q':
                             status = "skip"
                             break
-                        
-                        # P 上一曲
                         elif k == 'p':
                             status = "previous"
                             break
-                        
-                        # 空格 暂停
                         elif k in (' ', '\x20'):
                             is_paused = not is_paused
                             send_mpv_command(["set_property", "pause", is_paused])
@@ -298,16 +299,17 @@ async def play_audio_stream(track, all_tracks, index, total, lang="zh", mpris_co
                     await asyncio.sleep(0.05)
         
         finally:
-            # 恢复终端设置
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
     
     except Exception as e:
-        console.print(f"[#f38ba8]Error:[/] {e}")
-        await asyncio.sleep(1)
+        console.print(f"[#f38ba8]播放错误:[/] {e}")
+        import traceback
+        console.print(f"[dim]{traceback.format_exc()}[/dim]")
+        await asyncio.sleep(2)
         status = "skip"
     
     finally:
-        # 清理进程和 Socket
+        # 清理
         if proc and proc.poll() is None:
             proc.terminate()
             try:

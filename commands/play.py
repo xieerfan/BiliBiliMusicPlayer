@@ -23,6 +23,7 @@ def play(no_mpris):
     lang = config.get("lang", "zh")
     
     if not tracks:
+        click.echo("歌单为空，请先添加歌曲")
         return
     
     # 初始化 MPRIS 控制器
@@ -45,12 +46,19 @@ def play(no_mpris):
     
     try:
         idx = 0
-        while idx < len(tracks):
+        while True:  # 无限循环播放列表
+            # 边界检查
+            if idx >= len(tracks):
+                idx = 0  # 回到第一首
+            if idx < 0:
+                idx = len(tracks) - 1  # 回到最后一首
+            
             # 重置回调处理器状态
             if callback_handler:
                 callback_handler.should_skip = False
                 callback_handler.should_previous = False
                 callback_handler.should_exit = False
+                callback_handler.is_paused = False
             
             # 播放当前曲目
             result = asyncio.run(
@@ -68,15 +76,23 @@ def play(no_mpris):
             # 根据返回值决定下一步
             if result == "exit":
                 # ESC 退出或 MPRIS 停止
+                click.echo("\n✓ 播放已停止")
                 break
             elif result == "previous":
                 # 上一曲
-                idx = max(0, idx - 1)
-            else:
-                # "next" 或 "skip": 下一曲
+                idx -= 1
+            elif result == "skip":
+                # Q 跳过或 MPRIS 下一曲
                 idx += 1
-                if idx >= len(tracks):
-                    idx = 0  # 列表循环
+            elif result == "next":
+                # 自然播放完成，下一曲
+                idx += 1
+            else:
+                # 其他情况，默认下一曲
+                idx += 1
+    
+    except KeyboardInterrupt:
+        click.echo("\n✓ 用户中断播放")
     
     finally:
         # 停止 MPRIS 服务
